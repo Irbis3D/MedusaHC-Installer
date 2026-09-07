@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -45,10 +46,12 @@ class Component:
     repository: str
     status_paths: tuple[Path, ...]
     dependency: str | None = None
+    entrypoint: str = "install-online.sh"
+    requires_root: bool = False
 
     @property
     def installer_url(self) -> str:
-        return f"https://raw.githubusercontent.com/Irbis3D/{self.repository}/main/install-online.sh"
+        return f"https://raw.githubusercontent.com/Irbis3D/{self.repository}/main/{self.entrypoint}"
 
 
 COMPONENTS = (
@@ -74,6 +77,7 @@ COMPONENTS = (
         "MedusaHC-Control",
         (HOME / "medusahc-control",),
         "core",
+        requires_root=True,
     ),
     Component(
         "mainsail",
@@ -82,6 +86,7 @@ COMPONENTS = (
         "MedusaHC-Mainsail",
         (Path("/var/lib/medusahc-installer/manifest.json"),),
         "control",
+        entrypoint="install.sh",
     ),
 )
 
@@ -125,10 +130,20 @@ def header(section: str = "") -> None:
 
 def installed(component: Component) -> bool:
     if component.key == "mainsail":
+        for path in component.status_paths:
+            try:
+                if json.loads(path.read_text(encoding="utf-8")).get("mainsail", {}).get("installed"):
+                    return True
+            except (OSError, ValueError, AttributeError):
+                pass
         return any(
             (directory / "mainsail-medusahc.js").is_file()
             for directory in (HOME / "mainsail", HOME / "mainsail-medusahc")
         )
+    if component.key == "control":
+        return (Path("/etc/systemd/system/medusahc-control.service").is_file()
+                or any((path / "medusahc_control" / "__main__.py").is_file()
+                       for path in (*component.status_paths, Path("/opt/medusahc-control"))))
     return all(path.exists() for path in component.status_paths)
 
 
@@ -206,7 +221,10 @@ def run_installer(item: Component, action: str, extra: tuple[str, ...] = ()) -> 
             temporary = Path(handle.name)
             with urllib.request.urlopen(item.installer_url, timeout=30) as response:
                 handle.write(response.read())
-        result = subprocess.run(["bash", str(temporary), action, *extra], check=False)
+        command = ["bash", str(temporary), action, *extra]
+        if item.requires_root:
+            command.insert(0, "sudo")
+        result = subprocess.run(command, check=False)
         if result.returncode == 0:
             print(c("\nOperation completed successfully.", GREEN))
         else:
